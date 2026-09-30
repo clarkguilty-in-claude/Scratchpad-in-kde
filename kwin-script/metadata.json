@@ -1,0 +1,16 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Category": "Windows and Tasks",
+        "Description": "Meta+S shows or hides a floating scratchpad window (a terminal by default) on top of everything, fullscreen windows included.",
+        "EnabledByDefault": false,
+        "Icon": "utilities-terminal",
+        "Id": "kde-scratchpad",
+        "Name": "Scratchpad",
+        "Version": "1.0",
+        "Website": "https://github.com/clarkguilty-in-claude/Scratchpad-in-kde"
+    },
+    "X-KDE-ConfigModule": "kwin/effects/configs/kcm_kwin4_genericscripted",
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

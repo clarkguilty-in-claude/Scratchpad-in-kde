@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <!-- KWin stores these in kwinrc, group [Script-kde-scratchpad]. -->
+  <kcfgfile name=""/>
+  <group name="">
+    <entry name="TerminalCommand" type="String">
+      <label>Command that opens the scratchpad terminal</label>
+      <default>konsole</default>
+    </entry>
+    <entry name="TerminalWindowClass" type="String">
+      <label>Window class used to recognise the terminal (empty: the program name)</label>
+      <default></default>
+    </entry>
+    <entry name="WidthPercent" type="Int">
+      <label>Width of a new scratchpad terminal, in percent of the screen</label>
+      <default>60</default>
+      <min>10</min>
+      <max>100</max>
+    </entry>
+    <entry name="HeightPercent" type="Int">
+      <label>Height of a new scratchpad terminal, in percent of the screen</label>
+      <default>60</default>
+      <min>10</min>
+      <max>100</max>
+    </entry>
+  </group>
+</kcfg>
