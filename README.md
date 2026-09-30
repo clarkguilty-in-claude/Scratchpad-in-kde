@@ -4,6 +4,8 @@ Press **Meta+S** (Super+S) to bring up a floating terminal on top of whatever yo
 
 Built for Fedora 44 KDE (Plasma 6, Wayland). It should work on any Plasma 6 desktop that runs on systemd.
 
+Inspired by the scratchpad feature in [instantOS](https://instantos.io). This project brings the same idea to KDE Plasma.
+
 ## Install
 
 ```sh
