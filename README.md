@@ -18,7 +18,7 @@ No root needed. Everything goes in your home directory. Run `./install.sh` again
 
 | Key | What it does |
 | --- | --- |
-| **Meta+S** | Empty scratchpad: opens a terminal and puts it in the scratchpad. Hidden: shows it on your current desktop and focuses it. Visible but not focused: focuses it. Focused: hides it. |
+| **Meta+S** | Opens a terminal **only** when the scratchpad is empty, and puts it in the scratchpad. If something is already in it, Meta+S never opens anything. It just shows it (hidden: brings it up on your current desktop, focused), focuses it (visible but behind something), or hides it (focused). |
 | **Meta+Shift+S** | Puts the focused window in the scratchpad (it replaces the one already there). If the focused window is the scratchpad, takes it back out so it's a normal window again. |
 
 It always comes back exactly where you left it, with the same size. Move or resize it however you like and that's the spot it returns to. On a multi-monitor setup it stays on its own screen. The only exception is when that screen gets unplugged. Then it stays wherever KWin moved it.

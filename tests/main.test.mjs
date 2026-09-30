@@ -198,6 +198,39 @@ test("a terminal that shows up long after the key press is left alone", () => {
     assert.equal(kwin.scratchpad(), null);
 });
 
+test("Meta+S only ever opens a terminal when the scratchpad is empty", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    const browser = kwin.openWindow({ resourceClass: "firefox" });
+    const pressWellApart = () => {
+        kwin.advanceTime(20_000); // well past the terminal start-up wait
+        kwin.press("Meta+S");
+    };
+
+    pressWellApart(); // visible, focused   -> hides it
+    pressWellApart(); // hidden             -> shows it
+    kwin.focus(browser);
+    pressWellApart(); // visible, unfocused -> focuses it
+    pressWellApart(); // focused            -> hides it
+    kwin.workspace.currentDesktop = desktopTwo;
+    pressWellApart(); // hidden, you moved to another desktop -> shows it there
+    assert.equal(terminalLaunches(kwin).length, 1);
+    assert.equal(kwin.workspace.activeWindow, terminal);
+
+    // Something you put in by hand counts too.
+    kwin.focus(browser);
+    kwin.press("Meta+Shift+S");
+    pressWellApart();
+    pressWellApart();
+    assert.equal(terminalLaunches(kwin).length, 1);
+
+    // Empty again (the window closed): now, and only now, a new terminal.
+    kwin.closeWindow(browser);
+    pressWellApart();
+    assert.equal(terminalLaunches(kwin).length, 2);
+});
+
 test("later presses hide and show it", () => {
     const kwin = loadScript();
     kwin.press("Meta+S");
