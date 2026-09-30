@@ -2,9 +2,10 @@
  * Scratchpad for KDE Plasma 6.
  *
  * Keeps one window in a "scratchpad": a floating window that Meta+S pulls up on
- * top of everything (fullscreen windows included) on the current desktop and
- * screen, and hides again on the next press. If the scratchpad is empty, Meta+S
- * opens a terminal and that terminal becomes the scratchpad.
+ * top of everything (fullscreen windows included) on the current desktop, and
+ * hides again on the next press. It always comes back with the same position
+ * and size it had when it was hidden. If the scratchpad is empty, Meta+S opens
+ * a terminal and that terminal becomes the scratchpad.
  *
  * KWin scripts can't start programs, so the terminal is started by asking
  * systemd to run kde-scratchpad-terminal@<n>.service (installed by install.sh).
@@ -21,6 +22,9 @@ let scratchpadWindow = null;
 // The window's flags from before it went into the scratchpad, so taking it back
 // out leaves it the way it was.
 let flagsBeforeScratchpad = null;
+// Where the scratchpad was the last time it was on screen. Showing it puts it
+// back exactly there.
+let lastVisibleGeometry = null;
 // When we last asked systemd for a terminal, or null if we aren't waiting for one.
 let terminalRequestedAt = null;
 
@@ -37,7 +41,6 @@ function readSettings() {
         terminalWindowClass: terminalWindowClass.toLowerCase(),
         widthPercent: toPercent(readConfig("WidthPercent", DEFAULT_SIZE_PERCENT)),
         heightPercent: toPercent(readConfig("HeightPercent", DEFAULT_SIZE_PERCENT)),
-        useFocusedWindowWhenEmpty: isTrue(readConfig("UseFocusedWindowWhenEmpty", false)),
     };
 }
 
@@ -54,30 +57,18 @@ function toPercent(value) {
     return Math.min(100, Math.max(10, number));
 }
 
-function isTrue(value) {
-    return value === true || String(value).toLowerCase() === "true";
-}
-
 
 // ---- Shortcut actions -------------------------------------------------------
 
 // Meta+S
 function toggleScratchpad() {
-    if (scratchpadWindow) {
-        if (isScratchpadFocused()) {
-            hideScratchpad();
-        } else {
-            showScratchpad();
-        }
-        return;
+    if (!scratchpadWindow) {
+        startTerminal();
+    } else if (isScratchpadFocused()) {
+        hideScratchpad();
+    } else {
+        showScratchpad();
     }
-
-    const focusedWindow = workspace.activeWindow;
-    if (settings.useFocusedWindowWhenEmpty && canBeScratchpad(focusedWindow)) {
-        moveIntoScratchpad(focusedWindow);
-        return;
-    }
-    startTerminal();
 }
 
 // Meta+Shift+S
@@ -123,11 +114,21 @@ function adopt(window) {
         skipPager: window.skipPager,
         skipSwitcher: window.skipSwitcher,
     };
+    lastVisibleGeometry = copyRect(window.frameGeometry);
+    window.frameGeometryChanged.connect(rememberGeometry);
+
     // Kept out of the taskbar, pager and Alt+Tab: Meta+S is the way to reach it.
     window.keepAbove = true;
     window.skipTaskbar = true;
     window.skipPager = true;
     window.skipSwitcher = true;
+}
+
+function forgetScratchpad() {
+    scratchpadWindow.frameGeometryChanged.disconnect(rememberGeometry);
+    scratchpadWindow = null;
+    flagsBeforeScratchpad = null;
+    lastVisibleGeometry = null;
 }
 
 function moveIntoScratchpad(window) {
@@ -144,8 +145,7 @@ function releaseScratchpad() {
     // Unknown when we picked the window up after a script reload; assume plain defaults.
     const originalFlags = flagsBeforeScratchpad
         || { keepAbove: false, skipTaskbar: false, skipPager: false, skipSwitcher: false };
-    scratchpadWindow = null;
-    flagsBeforeScratchpad = null;
+    forgetScratchpad();
 
     window.keepAbove = originalFlags.keepAbove;
     window.skipTaskbar = originalFlags.skipTaskbar;
@@ -177,12 +177,14 @@ function isScratchpadFocused() {
 
 function showScratchpad() {
     const window = scratchpadWindow;
+    // Read it before un-minimizing: if KWin moved the window while it was
+    // hidden, that move would otherwise be remembered as the new spot.
+    const geometryToRestore = lastVisibleGeometry;
+
     bringToCurrentDesktopAndActivity(window);
-    if (!isOnActiveScreen(window)) {
-        centerOnActiveScreen(window, window.width, window.height);
-    }
     window.keepAbove = true;
     window.minimized = false;
+    restoreGeometry(window, geometryToRestore);
     // Focusing it also drops a fullscreen window out of KWin's top layer,
     // so the scratchpad ends up above it.
     workspace.activeWindow = window;
@@ -208,24 +210,63 @@ function bringToCurrentDesktopAndActivity(window) {
     }
 }
 
-function isOnActiveScreen(window) {
-    const activeScreen = workspace.activeScreen;
-    return !!window.output && !!activeScreen && window.output.name === activeScreen.name;
+
+// ---- Position and size ------------------------------------------------------
+
+// Runs every time the scratchpad moves or resizes, including while you drag it.
+function rememberGeometry() {
+    if (scratchpadWindow && !scratchpadWindow.minimized) {
+        lastVisibleGeometry = copyRect(scratchpadWindow.frameGeometry);
+    }
 }
 
-function activeScreenArea() {
-    return workspace.clientArea(KWin.MaximizeArea, workspace.activeScreen, workspace.currentDesktop);
+function restoreGeometry(window, geometry) {
+    if (!geometry || isSameRect(window.frameGeometry, geometry)) {
+        return;
+    }
+    // Skip it if that spot is on a screen that has since been unplugged.
+    if (!isOnAnyScreen(geometry)) {
+        return;
+    }
+    window.frameGeometry = copyRect(geometry);
 }
 
-function centerOnActiveScreen(window, width, height) {
-    const area = activeScreenArea();
-    const fittedWidth = Math.round(Math.min(width, area.width));
-    const fittedHeight = Math.round(Math.min(height, area.height));
+function isOnAnyScreen(rect) {
+    const screens = workspace.screens;
+    if (!screens) {
+        return true; // can't tell on this KWin version, so trust the saved spot
+    }
+    const centerX = rect.x + rect.width / 2;
+    const centerY = rect.y + rect.height / 2;
+    for (let index = 0; index < screens.length; index++) {
+        const screenArea = screens[index].geometry;
+        if (centerX >= screenArea.x && centerX < screenArea.x + screenArea.width
+            && centerY >= screenArea.y && centerY < screenArea.y + screenArea.height) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function copyRect(rect) {
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+}
+
+function isSameRect(first, second) {
+    return first.x === second.x && first.y === second.y
+        && first.width === second.width && first.height === second.height;
+}
+
+// Only for a freshly opened terminal. After that it keeps wherever you put it.
+function centerNewTerminal(window) {
+    const area = workspace.clientArea(KWin.MaximizeArea, workspace.activeScreen, workspace.currentDesktop);
+    const width = Math.round(area.width * settings.widthPercent / 100);
+    const height = Math.round(area.height * settings.heightPercent / 100);
     window.frameGeometry = {
-        x: Math.round(area.x + (area.width - fittedWidth) / 2),
-        y: Math.round(area.y + (area.height - fittedHeight) / 2),
-        width: fittedWidth,
-        height: fittedHeight,
+        x: Math.round(area.x + (area.width - width) / 2),
+        y: Math.round(area.y + (area.height - height) / 2),
+        width: width,
+        height: height,
     };
 }
 
@@ -254,10 +295,15 @@ function startTerminal() {
         "org.freedesktop.systemd1.Manager", "StartUnit", unitName, "replace");
 }
 
+// Matches the whole class or one dot-separated part of it: "konsole" matches
+// org.kde.konsole and "wezterm" matches org.wezfurlong.wezterm, but "st" doesn't
+// match steam.
 function looksLikeTheTerminal(window) {
-    const expectedClass = settings.terminalWindowClass;
-    return [window.resourceClass, window.resourceName, window.desktopFileName]
-        .some(name => String(name || "").toLowerCase().indexOf(expectedClass) !== -1);
+    const expectedName = settings.terminalWindowClass;
+    return [window.resourceClass, window.resourceName, window.desktopFileName].some(name => {
+        const lowerCaseName = String(name || "").toLowerCase();
+        return lowerCaseName === expectedName || lowerCaseName.split(".").indexOf(expectedName) !== -1;
+    });
 }
 
 function onWindowAdded(window) {
@@ -269,17 +315,13 @@ function onWindowAdded(window) {
         return;
     }
     adopt(window);
-    const area = activeScreenArea();
-    centerOnActiveScreen(window,
-        area.width * settings.widthPercent / 100,
-        area.height * settings.heightPercent / 100);
+    centerNewTerminal(window);
     showScratchpad();
 }
 
 function onWindowRemoved(window) {
     if (window === scratchpadWindow) {
-        scratchpadWindow = null;
-        flagsBeforeScratchpad = null;
+        forgetScratchpad();
     }
 }
 
@@ -299,4 +341,8 @@ options.configChanged.connect(() => {
     settings = readSettings();
 });
 
-scratchpadWindow = findLeftoverScratchpad();
+const leftoverScratchpad = findLeftoverScratchpad();
+if (leftoverScratchpad) {
+    adopt(leftoverScratchpad);
+    flagsBeforeScratchpad = null; // what we'd record now are our own flags
+}

@@ -8,11 +8,15 @@ readonly default_terminal_command="konsole"
 # Same setting the KWin script's settings page writes.
 terminal_command="$(kreadconfig6 --file kwinrc --group Script-kde-scratchpad \
     --key TerminalCommand --default "$default_terminal_command" 2>/dev/null)"
-if [[ -z "${terminal_command//[[:space:]]/}" ]]; then
-    terminal_command="$default_terminal_command"
+
+# Split into words without going through a shell: arguments work
+# (konsole --profile Scratchpad), but the setting is never run as shell code.
+read -r -a terminal_argv <<< "$terminal_command"
+if [[ ${#terminal_argv[@]} -eq 0 ]]; then
+    terminal_argv=("$default_terminal_command")
 fi
 
-read -r terminal_program _ <<< "$terminal_command"
+terminal_program="${terminal_argv[0]}"
 if ! command -v "$terminal_program" >/dev/null 2>&1; then
     error_message="Can't find '$terminal_program'. Pick another terminal in System Settings > Window Management > KWin Scripts > Scratchpad."
     echo "$error_message" >&2
@@ -22,6 +26,4 @@ if ! command -v "$terminal_program" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Run through sh on purpose, so the setting can carry arguments
-# (konsole --profile Scratchpad).
-exec sh -c "exec $terminal_command"
+exec "${terminal_argv[@]}"

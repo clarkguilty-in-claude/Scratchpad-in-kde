@@ -11,19 +11,26 @@ const scriptSource = readFileSync(
 function makeSignal() {
     const handlers = [];
     return {
+        handlers,
         connect: handler => handlers.push(handler),
-        emit: (...args) => handlers.forEach(handler => handler(...args)),
+        disconnect: handler => {
+            const index = handlers.indexOf(handler);
+            if (index !== -1) {
+                handlers.splice(index, 1);
+            }
+        },
+        emit: (...args) => handlers.slice().forEach(handler => handler(...args)),
     };
 }
 
 // Two 1920x1080 screens side by side, each with a 40px panel at the bottom.
-const leftScreen = { name: "DP-1", x: 0 };
-const rightScreen = { name: "HDMI-1", x: 1920 };
+const leftScreen = { name: "DP-1", geometry: { x: 0, y: 0, width: 1920, height: 1080 } };
+const rightScreen = { name: "HDMI-1", geometry: { x: 1920, y: 0, width: 1920, height: 1080 } };
 const desktopOne = { name: "Desktop 1" };
 const desktopTwo = { name: "Desktop 2" };
 
 function screenAtX(x) {
-    return x >= rightScreen.x ? rightScreen : leftScreen;
+    return x >= rightScreen.geometry.x ? rightScreen : leftScreen;
 }
 
 class FakeWindow {
@@ -44,10 +51,14 @@ class FakeWindow {
         this.activities = [];
         this.isMinimized = false;
         this.geometry = { x: 100, y: 100, width: 800, height: 500 };
+        this.frameGeometryChanged = makeSignal();
         Object.assign(this, properties);
     }
-    get frameGeometry() { return this.geometry; }
-    set frameGeometry(rect) { this.geometry = { ...rect }; }
+    get frameGeometry() { return { ...this.geometry }; }
+    set frameGeometry(rect) {
+        this.geometry = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        this.frameGeometryChanged.emit();
+    }
     get output() { return screenAtX(this.geometry.x); }
     get width() { return this.geometry.width; }
     get height() { return this.geometry.height; }
@@ -80,10 +91,11 @@ function loadScript({ config = {}, existingWindows = [] } = {}) {
         currentDesktop: desktopOne,
         currentActivity: "activity-1",
         activeScreen: leftScreen,
+        screens: [leftScreen, rightScreen],
         windowAdded: makeSignal(),
         windowRemoved: makeSignal(),
         windowList: () => windows.slice(),
-        clientArea: (option, screen) => ({ x: screen.x, y: 0, width: 1920, height: 1040 }),
+        clientArea: (option, screen) => ({ x: screen.geometry.x, y: 0, width: 1920, height: 1040 }),
         raiseWindow: () => {},
     };
 
@@ -150,6 +162,18 @@ test("Meta+S on an empty scratchpad starts one terminal through systemd", () => 
     assert.equal(launches[0][5], "replace");
 });
 
+test("Meta+S on an empty scratchpad opens a terminal even when another window has focus", () => {
+    const kwin = loadScript();
+    const browser = kwin.openWindow({ resourceClass: "firefox" });
+    kwin.focus(browser);
+
+    kwin.press("Meta+S");
+    assert.equal(terminalLaunches(kwin).length, 1);
+    assert.equal(kwin.scratchpad(), null);
+    assert.equal(browser.minimized, false);
+    assert.equal(browser.skipTaskbar, false);
+});
+
 test("the terminal window becomes a centered, focused, always-on-top scratchpad", () => {
     const kwin = loadScript();
     kwin.press("Meta+S");
@@ -200,7 +224,7 @@ test("if it's visible but another window has focus, Meta+S focuses it instead of
     assert.equal(kwin.workspace.activeWindow, terminal);
 });
 
-test("it follows you to the current desktop, activity and screen", () => {
+test("it follows you to the current desktop and activity", () => {
     const kwin = loadScript();
     kwin.press("Meta+S");
     const terminal = openKonsole(kwin);
@@ -209,14 +233,64 @@ test("it follows you to the current desktop, activity and screen", () => {
     terminal.activities = ["activity-1"];
     kwin.workspace.currentDesktop = desktopTwo;
     kwin.workspace.currentActivity = "activity-2";
-    kwin.workspace.activeScreen = rightScreen;
     kwin.press("Meta+S");
 
     // Arrays made inside the vm sandbox have their own prototype, so copy them out first.
     assert.deepEqual([...terminal.desktops], [desktopTwo]);
     assert.deepEqual([...terminal.activities], ["activity-2"]);
-    assert.equal(terminal.output, rightScreen);
-    assert.equal(terminal.width, 1152);
+});
+
+test("hiding and showing keeps the position and size you gave it", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    const spotYouChose = { x: 40, y: 50, width: 700, height: 400 };
+    terminal.frameGeometry = spotYouChose; // you drag and resize it
+
+    kwin.press("Meta+S");
+    kwin.press("Meta+S");
+    assert.deepEqual(terminal.frameGeometry, spotYouChose);
+});
+
+test("it stays on its own screen instead of jumping to the one you're on", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    const spotOnRightScreen = { x: 2100, y: 80, width: 900, height: 600 };
+    terminal.frameGeometry = spotOnRightScreen;
+    kwin.press("Meta+S");
+
+    kwin.workspace.activeScreen = leftScreen;
+    kwin.press("Meta+S");
+    assert.deepEqual(terminal.frameGeometry, spotOnRightScreen);
+    assert.equal(kwin.workspace.activeWindow, terminal);
+});
+
+test("if something moves it while it's hidden, showing it puts it back", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    const spotYouChose = { x: 40, y: 50, width: 700, height: 400 };
+    terminal.frameGeometry = spotYouChose;
+    kwin.press("Meta+S");
+
+    terminal.frameGeometry = { x: 0, y: 0, width: 300, height: 200 }; // KWin shuffles it while minimized
+    kwin.press("Meta+S");
+    assert.deepEqual(terminal.frameGeometry, spotYouChose);
+});
+
+test("if its screen was unplugged while hidden, it stays where KWin moved it", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    terminal.frameGeometry = { x: 2100, y: 80, width: 900, height: 600 };
+    kwin.press("Meta+S");
+
+    kwin.workspace.screens = [leftScreen];
+    const spotKwinPicked = { x: 180, y: 80, width: 900, height: 600 };
+    terminal.frameGeometry = spotKwinPicked;
+    kwin.press("Meta+S");
+    assert.deepEqual(terminal.frameGeometry, spotKwinPicked);
 });
 
 test("closing the scratchpad terminal means the next Meta+S opens a new one", () => {
@@ -239,27 +313,19 @@ test("the terminal is recognised by the configured command or window class", () 
     const alacrittyWindow = alacritty.openWindow({ resourceClass: "Alacritty" });
     assert.equal(alacritty.scratchpad(), alacrittyWindow);
 
+    const suckless = loadScript({ config: { TerminalCommand: "st" } });
+    suckless.press("Meta+S");
+    suckless.openWindow({ resourceClass: "steam" });
+    assert.equal(suckless.scratchpad(), null);
+    const stWindow = suckless.openWindow({ resourceClass: "St", resourceName: "st-256color" });
+    assert.equal(suckless.scratchpad(), stWindow);
+
     const wezterm = loadScript({
         config: { TerminalCommand: "flatpak run org.wezfurlong.wezterm", TerminalWindowClass: "wezterm" },
     });
     wezterm.press("Meta+S");
     const weztermWindow = wezterm.openWindow({ desktopFileName: "org.wezfurlong.wezterm" });
     assert.equal(wezterm.scratchpad(), weztermWindow);
-});
-
-test("with UseFocusedWindowWhenEmpty, Meta+S puts the focused window in the scratchpad", () => {
-    const kwin = loadScript({ config: { UseFocusedWindowWhenEmpty: true } });
-    const editor = kwin.openWindow({ resourceClass: "kate" });
-    kwin.focus(editor);
-
-    kwin.press("Meta+S");
-    assert.equal(kwin.scratchpad(), editor);
-    assert.equal(editor.minimized, true);
-    assert.equal(terminalLaunches(kwin).length, 0);
-    assert.ok(kwin.dbusCalls.some(call => call[3] === "showText"));
-
-    kwin.press("Meta+S");
-    assert.equal(kwin.workspace.activeWindow, editor);
 });
 
 test("Meta+Shift+S moves the focused window in, and back out with its old flags", () => {
@@ -270,8 +336,10 @@ test("Meta+Shift+S moves the focused window in, and back out with its old flags"
     kwin.press("Meta+Shift+S");
     assert.equal(kwin.scratchpad(), editor);
     assert.equal(editor.minimized, true);
+    assert.ok(kwin.dbusCalls.some(call => call[3] === "showText"));
 
     kwin.press("Meta+S");
+    assert.equal(kwin.workspace.activeWindow, editor);
     kwin.press("Meta+Shift+S");
     assert.equal(kwin.scratchpad(), null);
     assert.equal(editor.keepAbove, true);
@@ -290,6 +358,9 @@ test("Meta+Shift+S on a second window swaps it in and gives the first one back",
 
     assert.equal(kwin.scratchpad(), second);
     assert.equal(first.skipTaskbar, false);
+    // Moving the old window around no longer touches the scratchpad's saved spot.
+    assert.equal(first.frameGeometryChanged.handlers.length, 0);
+    assert.equal(second.frameGeometryChanged.handlers.length, 1);
 });
 
 test("dialogs and other special windows can't become the scratchpad", () => {
@@ -328,5 +399,11 @@ test("after a script reload, the hidden scratchpad window is picked up again", (
 
     kwin.press("Meta+S");
     assert.equal(kwin.workspace.activeWindow, leftover);
+    assert.deepEqual(leftover.frameGeometry, { x: 100, y: 100, width: 800, height: 500 });
     assert.equal(terminalLaunches(kwin).length, 0);
+
+    // It was ours, so taking it out clears all our flags.
+    kwin.press("Meta+Shift+S");
+    assert.equal(leftover.keepAbove, false);
+    assert.equal(leftover.skipTaskbar, false);
 });

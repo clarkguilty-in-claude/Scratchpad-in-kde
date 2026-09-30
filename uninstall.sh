@@ -2,6 +2,9 @@
 # Removes everything install.sh put in place.
 set -uo pipefail
 
+# Everything below deletes paths under $HOME, so refuse to run without it.
+: "${HOME:?HOME is not set}"
+
 readonly script_id="kde-scratchpad"
 readonly shortcut_names=(
     "Scratchpad: Toggle"

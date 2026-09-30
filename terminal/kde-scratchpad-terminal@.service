@@ -8,6 +8,8 @@ After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
+# No sandboxing options on purpose: this is your interactive shell, and things
+# like NoNewPrivileges= would break sudo inside it.
 Type=exec
 ExecStart=%h/.local/share/kde-scratchpad/launch-terminal.sh
 Slice=app.slice

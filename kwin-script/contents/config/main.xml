@@ -26,9 +26,5 @@
       <min>10</min>
       <max>100</max>
     </entry>
-    <entry name="UseFocusedWindowWhenEmpty" type="Bool">
-      <label>When the scratchpad is empty, Meta+S takes the focused window instead of opening a terminal</label>
-      <default>false</default>
-    </entry>
   </group>
 </kcfg>
