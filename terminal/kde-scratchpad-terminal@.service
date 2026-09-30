@@ -1,0 +1,15 @@
+# Started by the Scratchpad KWin script (KWin scripts can't launch programs on
+# their own). Each launch uses a new instance name, e.g.
+# kde-scratchpad-terminal@1727690000000.service.
+[Unit]
+Description=Scratchpad terminal (%i)
+Documentation=https://github.com/clarkguilty-in-claude/Scratchpad-in-kde
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/share/kde-scratchpad/launch-terminal.sh
+Slice=app.slice
+# Forget the instance as soon as the terminal closes, even if its last command failed.
+CollectMode=inactive-or-failed
