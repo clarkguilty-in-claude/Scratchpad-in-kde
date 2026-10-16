@@ -1,11 +1,12 @@
 /*
  * Scratchpad for KDE Plasma 6.
  *
- * Keeps one window in a "scratchpad": a floating window that Meta+S pulls up on
- * top of everything (fullscreen windows included) on the current desktop, and
- * hides again on the next press. It always comes back with the same position
- * and size it had when it was hidden. If the scratchpad is empty, Meta+S opens
- * a terminal and that terminal becomes the scratchpad.
+ * Keeps one window in a "scratchpad". Meta+S pulls it up on the current desktop,
+ * above everything that's open (fullscreen windows included), and focuses it.
+ * It isn't pinned there: whatever you open or click afterwards goes on top of
+ * it. The next Meta+S hides it, whether or not it's covered or focused. It
+ * always comes back with the same position and size. If the scratchpad is
+ * empty, Meta+S opens a terminal and that terminal becomes the scratchpad.
  *
  * KWin scripts can't start programs, so the terminal is started by asking
  * systemd to run kde-scratchpad-terminal@<n>.service (installed by install.sh).
@@ -60,11 +61,12 @@ function toPercent(value) {
 
 // ---- Shortcut actions -------------------------------------------------------
 
-// Meta+S
+// Meta+S. On screen (even covered or unfocused): hide it. Otherwise: show and
+// focus it. Empty: open a terminal, which then shows up focused.
 function toggleScratchpad() {
     if (!scratchpadWindow) {
         startTerminal();
-    } else if (isScratchpadFocused()) {
+    } else if (isScratchpadOnScreen()) {
         hideScratchpad();
     } else {
         showScratchpad();
@@ -109,7 +111,6 @@ function adopt(window) {
     scratchpadWindow = window;
     terminalRequestedAt = null;
     flagsBeforeScratchpad = {
-        keepAbove: window.keepAbove,
         skipTaskbar: window.skipTaskbar,
         skipPager: window.skipPager,
         skipSwitcher: window.skipSwitcher,
@@ -118,7 +119,7 @@ function adopt(window) {
     window.frameGeometryChanged.connect(rememberGeometry);
 
     // Kept out of the taskbar, pager and Alt+Tab: Meta+S is the way to reach it.
-    window.keepAbove = true;
+    // Not pinned on top, so windows you open later can cover it.
     window.skipTaskbar = true;
     window.skipPager = true;
     window.skipSwitcher = true;
@@ -144,10 +145,9 @@ function releaseScratchpad() {
     const window = scratchpadWindow;
     // Unknown when we picked the window up after a script reload; assume plain defaults.
     const originalFlags = flagsBeforeScratchpad
-        || { keepAbove: false, skipTaskbar: false, skipPager: false, skipSwitcher: false };
+        || { skipTaskbar: false, skipPager: false, skipSwitcher: false };
     forgetScratchpad();
 
-    window.keepAbove = originalFlags.keepAbove;
     window.skipTaskbar = originalFlags.skipTaskbar;
     window.skipPager = originalFlags.skipPager;
     window.skipSwitcher = originalFlags.skipSwitcher;
@@ -160,8 +160,8 @@ function findLeftoverScratchpad() {
     const windows = workspace.windowList();
     for (let index = 0; index < windows.length; index++) {
         const window = windows[index];
-        if (canBeScratchpad(window) && window.keepAbove && window.skipTaskbar
-            && window.skipPager && window.skipSwitcher) {
+        if (canBeScratchpad(window) && window.skipTaskbar && window.skipPager
+            && window.skipSwitcher) {
             return window;
         }
     }
@@ -171,8 +171,36 @@ function findLeftoverScratchpad() {
 
 // ---- Showing and hiding -----------------------------------------------------
 
-function isScratchpadFocused() {
-    return !scratchpadWindow.minimized && workspace.activeWindow === scratchpadWindow;
+// On screen = not minimized, and on the desktop and activity you're looking at.
+// Other windows covering it or having focus doesn't matter.
+function isScratchpadOnScreen() {
+    const window = scratchpadWindow;
+    if (window.minimized) {
+        return false;
+    }
+    return isOnCurrentDesktop(window) && isOnCurrentActivity(window);
+}
+
+function isOnCurrentDesktop(window) {
+    if (window.onAllDesktops) {
+        return true;
+    }
+    const currentDesktopId = workspace.currentDesktop.id;
+    const windowDesktops = window.desktops;
+    for (let index = 0; index < windowDesktops.length; index++) {
+        if (windowDesktops[index].id === currentDesktopId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function isOnCurrentActivity(window) {
+    // An empty activity list means "on all activities".
+    const currentActivity = workspace.currentActivity;
+    const windowActivities = window.activities;
+    return !currentActivity || windowActivities.length === 0
+        || windowActivities.indexOf(currentActivity) !== -1;
 }
 
 function showScratchpad() {
@@ -182,11 +210,11 @@ function showScratchpad() {
     const geometryToRestore = lastVisibleGeometry;
 
     bringToCurrentDesktopAndActivity(window);
-    window.keepAbove = true;
     window.minimized = false;
     restoreGeometry(window, geometryToRestore);
-    // Focusing it also drops a fullscreen window out of KWin's top layer,
-    // so the scratchpad ends up above it.
+    // Focusing and raising it puts it above everything that's open, fullscreen
+    // windows included: KWin only keeps a fullscreen window in its top layer
+    // while that window has focus.
     workspace.activeWindow = window;
     if (typeof workspace.raiseWindow === "function") {
         workspace.raiseWindow(window);
@@ -198,15 +226,11 @@ function hideScratchpad() {
 }
 
 function bringToCurrentDesktopAndActivity(window) {
-    if (!window.onAllDesktops) {
+    if (!isOnCurrentDesktop(window)) {
         window.desktops = [workspace.currentDesktop];
     }
-    // An empty activity list means "on all activities".
-    const currentActivity = workspace.currentActivity;
-    const windowActivities = window.activities;
-    if (currentActivity && windowActivities.length > 0
-        && windowActivities.indexOf(currentActivity) === -1) {
-        window.activities = [currentActivity];
+    if (!isOnCurrentActivity(window)) {
+        window.activities = [workspace.currentActivity];
     }
 }
 
@@ -345,4 +369,5 @@ const leftoverScratchpad = findLeftoverScratchpad();
 if (leftoverScratchpad) {
     adopt(leftoverScratchpad);
     flagsBeforeScratchpad = null; // what we'd record now are our own flags
+    leftoverScratchpad.keepAbove = false; // version 1.0 pinned it on top
 }

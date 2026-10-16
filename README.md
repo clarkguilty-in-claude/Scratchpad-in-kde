@@ -20,14 +20,16 @@ No root needed. Everything goes in your home directory. Run `./install.sh` again
 
 | Key | What it does |
 | --- | --- |
-| **Meta+S** | Opens a terminal **only** when the scratchpad is empty, and puts it in the scratchpad. If something is already in it, Meta+S never opens anything. It just shows it (hidden: brings it up on your current desktop, focused), focuses it (visible but behind something), or hides it (focused). |
+| **Meta+S** | Opens a terminal **only** when the scratchpad is empty, and puts it in the scratchpad. If something is already in it, Meta+S never opens anything. It just shows it or hides it. Hidden: brings it up on your current desktop, on top and focused. On screen: hides it, even if other windows cover it or have focus. |
 | **Meta+Shift+S** | Puts the focused window in the scratchpad (it replaces the one already there). If the focused window is the scratchpad, takes it back out so it's a normal window again. |
 
 It always comes back exactly where you left it, with the same size. Move or resize it however you like and that's the spot it returns to. On a multi-monitor setup it stays on its own screen. The only exception is when that screen gets unplugged. Then it stays wherever KWin moved it.
 
 If you close the terminal (`exit`, Ctrl+D), the scratchpad is empty again and the next Meta+S opens a new one.
 
-While a window is in the scratchpad it stays on top of other windows and is left out of the taskbar and Alt+Tab. Meta+S is the way to get to it.
+When it shows up, it's on top of everything that's open, and it has focus. It isn't pinned there, though: a window you open or click afterwards goes over it. To get it back on top, click it or press Meta+S twice (hide, then show).
+
+While a window is in the scratchpad it's left out of the taskbar and Alt+Tab. Meta+S is the way to get to it.
 
 To change the keys: System Settings > Keyboard > Shortcuts > KWin, then search for "Scratchpad".
 
@@ -45,7 +47,7 @@ Changes apply the next time KWin loads the script: turn it off and on again on t
 
 - `kwin-script/` is a KWin script (JavaScript that runs inside the window manager). It registers the shortcuts and does the showing, hiding, focusing and positioning.
 - KWin scripts can't start programs. So when a terminal is needed, the script asks systemd to start `kde-scratchpad-terminal@<n>.service`, which runs `terminal/launch-terminal.sh`. The first window whose class matches your terminal and opens within 15 seconds becomes the scratchpad.
-- Hidden = minimized. Shown = unminimized, kept on top and focused. Focusing it is what gets it above fullscreen windows. KWin only keeps a fullscreen window in its top layer while that window has focus.
+- Hidden = minimized. Shown = unminimized, raised and focused. Focusing it is what gets it above fullscreen windows. KWin only keeps a fullscreen window in its top layer while that window has focus.
 - The script remembers the window's position and size every time you move or resize it. If anything shifted it while it was hidden, showing it puts it back.
 
 ## Troubleshooting

@@ -26,8 +26,8 @@ function makeSignal() {
 // Two 1920x1080 screens side by side, each with a 40px panel at the bottom.
 const leftScreen = { name: "DP-1", geometry: { x: 0, y: 0, width: 1920, height: 1080 } };
 const rightScreen = { name: "HDMI-1", geometry: { x: 1920, y: 0, width: 1920, height: 1080 } };
-const desktopOne = { name: "Desktop 1" };
-const desktopTwo = { name: "Desktop 2" };
+const desktopOne = { id: "desktop-1", name: "Desktop 1" };
+const desktopTwo = { id: "desktop-2", name: "Desktop 2" };
 
 function screenAtX(x) {
     return x >= rightScreen.geometry.x ? rightScreen : leftScreen;
@@ -78,14 +78,22 @@ function loadScript({ config = {}, existingWindows = [] } = {}) {
     const shortcuts = {};
     const dbusCalls = [];
     const windows = [];
+    // Bottom to top, like KWin's stacking order.
+    const stackingOrder = [];
+    const raise = window => {
+        stackingOrder.splice(stackingOrder.indexOf(window), 1);
+        stackingOrder.push(window);
+    };
 
     const fakeKwin = {};
     fakeKwin.workspace = {
         get activeWindow() { return focusedWindow; },
+        // Like KWin: activating a window un-minimizes and raises it.
         set activeWindow(window) {
             focusedWindow = window;
             if (window) {
                 window.isMinimized = false;
+                raise(window);
             }
         },
         currentDesktop: desktopOne,
@@ -96,11 +104,13 @@ function loadScript({ config = {}, existingWindows = [] } = {}) {
         windowRemoved: makeSignal(),
         windowList: () => windows.slice(),
         clientArea: (option, screen) => ({ x: screen.geometry.x, y: 0, width: 1920, height: 1040 }),
-        raiseWindow: () => {},
+        raiseWindow: raise,
     };
 
     for (const properties of existingWindows) {
-        windows.push(new FakeWindow(fakeKwin, properties));
+        const window = new FakeWindow(fakeKwin, properties);
+        windows.push(window);
+        stackingOrder.push(window);
     }
 
     const context = vm.createContext({
@@ -123,14 +133,27 @@ function loadScript({ config = {}, existingWindows = [] } = {}) {
         scratchpad: () => vm.runInContext("scratchpadWindow", context),
         press: keys => Object.values(shortcuts).find(shortcut => shortcut.keys === keys).callback(),
         advanceTime: milliseconds => { now += milliseconds; },
+        // Like KWin: a new window opens on top and gets focus.
         openWindow(properties) {
             const window = new FakeWindow(fakeKwin, properties);
             windows.push(window);
+            stackingOrder.push(window);
             fakeKwin.workspace.windowAdded.emit(window);
+            fakeKwin.workspace.activeWindow = window;
             return window;
+        },
+        // The window you'd see on top: keep-above windows sit over all the others.
+        topWindow() {
+            const visibleWindows = stackingOrder.filter(window => !window.minimized);
+            const layered = [
+                ...visibleWindows.filter(window => !window.keepAbove),
+                ...visibleWindows.filter(window => window.keepAbove),
+            ];
+            return layered[layered.length - 1] || null;
         },
         closeWindow(window) {
             windows.splice(windows.indexOf(window), 1);
+            stackingOrder.splice(stackingOrder.indexOf(window), 1);
             if (focusedWindow === window) {
                 focusedWindow = null;
             }
@@ -174,7 +197,7 @@ test("Meta+S on an empty scratchpad opens a terminal even when another window ha
     assert.equal(browser.skipTaskbar, false);
 });
 
-test("the terminal window becomes a centered, focused, always-on-top scratchpad", () => {
+test("the terminal window becomes a centered, focused scratchpad on top of everything", () => {
     const kwin = loadScript();
     kwin.press("Meta+S");
     const unrelatedWindow = kwin.openWindow({ resourceClass: "firefox" });
@@ -183,7 +206,8 @@ test("the terminal window becomes a centered, focused, always-on-top scratchpad"
     assert.equal(kwin.scratchpad(), terminal);
     assert.notEqual(kwin.scratchpad(), unrelatedWindow);
     assert.equal(kwin.workspace.activeWindow, terminal);
-    assert.equal(terminal.keepAbove, true);
+    assert.equal(kwin.topWindow(), terminal);
+    assert.equal(terminal.keepAbove, false); // on top because it was raised, not pinned
     assert.equal(terminal.skipTaskbar, true);
     assert.equal(terminal.skipPager, true);
     assert.equal(terminal.skipSwitcher, true);
@@ -200,21 +224,21 @@ test("a terminal that shows up long after the key press is left alone", () => {
 
 test("Meta+S only ever opens a terminal when the scratchpad is empty", () => {
     const kwin = loadScript();
+    const browser = kwin.openWindow({ resourceClass: "firefox" });
     kwin.press("Meta+S");
     const terminal = openKonsole(kwin);
-    const browser = kwin.openWindow({ resourceClass: "firefox" });
     const pressWellApart = () => {
         kwin.advanceTime(20_000); // well past the terminal start-up wait
         kwin.press("Meta+S");
     };
 
-    pressWellApart(); // visible, focused   -> hides it
-    pressWellApart(); // hidden             -> shows it
+    pressWellApart(); // on screen and focused          -> hides it
+    pressWellApart(); // hidden                         -> shows it
     kwin.focus(browser);
-    pressWellApart(); // visible, unfocused -> focuses it
-    pressWellApart(); // focused            -> hides it
+    pressWellApart(); // on screen, browser has focus   -> hides it anyway
+    pressWellApart(); // hidden                         -> shows it
     kwin.workspace.currentDesktop = desktopTwo;
-    pressWellApart(); // hidden, you moved to another desktop -> shows it there
+    pressWellApart(); // up, but on the desktop you left -> shows it here
     assert.equal(terminalLaunches(kwin).length, 1);
     assert.equal(kwin.workspace.activeWindow, terminal);
 
@@ -246,14 +270,59 @@ test("later presses hide and show it", () => {
     assert.equal(terminalLaunches(kwin).length, 1);
 });
 
-test("if it's visible but another window has focus, Meta+S focuses it instead of hiding it", () => {
+test("a window you open while the scratchpad is up goes on top of it", () => {
     const kwin = loadScript();
     kwin.press("Meta+S");
     const terminal = openKonsole(kwin);
-    kwin.focus(kwin.openWindow({ resourceClass: "firefox" }));
+
+    const browser = kwin.openWindow({ resourceClass: "firefox" });
+    assert.equal(kwin.topWindow(), browser);
+    assert.equal(kwin.workspace.activeWindow, browser);
+    assert.equal(terminal.minimized, false); // still there, just underneath
+});
+
+test("clicking the scratchpad brings it back on top", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    kwin.openWindow({ resourceClass: "firefox" });
+
+    kwin.focus(terminal);
+    assert.equal(kwin.topWindow(), terminal);
+});
+
+test("if it's on screen but not focused, Meta+S hides it anyway", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    const browser = kwin.openWindow({ resourceClass: "firefox" });
 
     kwin.press("Meta+S");
+    assert.equal(terminal.minimized, true);
+    assert.equal(kwin.workspace.activeWindow, browser); // focus isn't touched
+});
+
+test("pressing Meta+S twice brings a covered scratchpad back on top, focused", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+    kwin.openWindow({ resourceClass: "firefox" });
+
+    kwin.press("Meta+S");
+    kwin.press("Meta+S");
+    assert.equal(kwin.topWindow(), terminal);
+    assert.equal(kwin.workspace.activeWindow, terminal);
+});
+
+test("if you left it up on another desktop, Meta+S brings it here instead of hiding it", () => {
+    const kwin = loadScript();
+    kwin.press("Meta+S");
+    const terminal = openKonsole(kwin);
+
+    kwin.workspace.currentDesktop = desktopTwo;
+    kwin.press("Meta+S");
     assert.equal(terminal.minimized, false);
+    assert.deepEqual([...terminal.desktops], [desktopTwo]);
     assert.equal(kwin.workspace.activeWindow, terminal);
 });
 
@@ -422,7 +491,7 @@ test("after a script reload, the hidden scratchpad window is picked up again", (
         existingWindows: [
             { resourceClass: "firefox" },
             {
-                resourceClass: "org.kde.konsole", keepAbove: true, skipTaskbar: true,
+                resourceClass: "org.kde.konsole", skipTaskbar: true,
                 skipPager: true, skipSwitcher: true, isMinimized: true,
             },
         ],
@@ -437,6 +506,18 @@ test("after a script reload, the hidden scratchpad window is picked up again", (
 
     // It was ours, so taking it out clears all our flags.
     kwin.press("Meta+Shift+S");
-    assert.equal(leftover.keepAbove, false);
     assert.equal(leftover.skipTaskbar, false);
+    assert.equal(leftover.skipSwitcher, false);
+});
+
+test("updating from version 1.0 unpins the scratchpad it left on top", () => {
+    const kwin = loadScript({
+        existingWindows: [{
+            resourceClass: "org.kde.konsole", keepAbove: true, skipTaskbar: true,
+            skipPager: true, skipSwitcher: true,
+        }],
+    });
+    const leftover = kwin.windows[0];
+    assert.equal(kwin.scratchpad(), leftover);
+    assert.equal(leftover.keepAbove, false);
 });
