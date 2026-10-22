@@ -2,7 +2,7 @@
 
 Press **Meta+S** (Super+S) to bring up a floating terminal on top of whatever you're doing, fullscreen apps included. Press it again to hide the terminal. The same terminal (and whatever is running in it) comes back every time.
 
-Built for Fedora 44 KDE (Plasma 6, Wayland). It should work on any Plasma 6 desktop that runs on systemd.
+Built for Fedora 44 KDE (Plasma 6.6, Wayland). It should work on any Plasma 6 desktop that runs on systemd. Staying above fullscreen windows that have focus needs Plasma 6.5 or newer.
 
 Inspired by the scratchpad feature in [instantOS](https://instantos.io). This project brings the same idea to KDE Plasma.
 
@@ -20,14 +20,14 @@ No root needed. Everything goes in your home directory. Run `./install.sh` again
 
 | Key | What it does |
 | --- | --- |
-| **Meta+S** | Opens a terminal **only** when the scratchpad is empty, and puts it in the scratchpad. If something is already in it, Meta+S never opens anything. It just shows it or hides it. Hidden: brings it up on your current desktop, on top and focused. On screen: hides it, even if other windows cover it or have focus. |
+| **Meta+S** | Opens a terminal **only** when the scratchpad is empty, and puts it in the scratchpad. If something is already in it, Meta+S never opens anything. It just shows it or hides it. You can see it: hides it, focused or not. Hidden: brings it up on your current desktop, on top and focused. |
 | **Meta+Shift+S** | Puts the focused window in the scratchpad (it replaces the one already there). If the focused window is the scratchpad, takes it back out so it's a normal window again. |
 
 It always comes back exactly where you left it, with the same size. Move or resize it however you like and that's the spot it returns to. On a multi-monitor setup it stays on its own screen. The only exception is when that screen gets unplugged. Then it stays wherever KWin moved it.
 
 If you close the terminal (`exit`, Ctrl+D), the scratchpad is empty again and the next Meta+S opens a new one.
 
-When it shows up, it's on top of everything that's open, and it has focus. It isn't pinned there, though: a window you open or click afterwards goes over it. To get it back on top, click it or press Meta+S twice (hide, then show).
+It stays on top of everything: windows you open or click afterwards stay underneath it, and so do fullscreen windows like a video you're watching. Whenever it shows up, it has focus. The one thing that can cover it is a window that goes fullscreen *after* it appeared, like a screenshot tool's overlay. If that happens, Meta+S brings the scratchpad back on top instead of hiding it.
 
 While a window is in the scratchpad it's left out of the taskbar and Alt+Tab. Meta+S is the way to get to it.
 
@@ -47,14 +47,25 @@ Changes apply the next time KWin loads the script: turn it off and on again on t
 
 - `kwin-script/` is a KWin script (JavaScript that runs inside the window manager). It registers the shortcuts and does the showing, hiding, focusing and positioning.
 - KWin scripts can't start programs. So when a terminal is needed, the script asks systemd to start `kde-scratchpad-terminal@<n>.service`, which runs `terminal/launch-terminal.sh`. The first window whose class matches your terminal and opens within 15 seconds becomes the scratchpad.
-- Hidden = minimized. Shown = unminimized, raised and focused. Focusing it is what gets it above fullscreen windows. KWin only keeps a fullscreen window in its top layer while that window has focus.
+- Hidden = minimized. Shown = unminimized, kept above other windows ("keep above"), raised and focused. A fullscreen window with focus normally goes above keep-above windows, so the script also tells KWin to keep the scratchpad above the fullscreen and keep-above windows that are open when it appears (`workspace.constrain`, Plasma 6.5+).
+- Every step is logged with a `kde-scratchpad:` prefix, so `journalctl --user -b | grep kde-scratchpad` shows what it did and why.
 - The script remembers the window's position and size every time you move or resize it. If anything shifted it while it was hidden, showing it puts it back.
 
 ## Troubleshooting
 
-- **Meta+S does nothing.** Something else may already use Meta+S. Check System Settings > Keyboard > Shortcuts and search for "Scratchpad". Also check that "Scratchpad" is ticked under Window Management > KWin Scripts.
-- **A terminal opens but doesn't act like a scratchpad.** The window didn't match the terminal window class. Set "Terminal window class" in the settings (see above).
-- **No terminal opens.** Check the logs with `journalctl --user -b | grep -i scratchpad`, and try `systemctl --user start kde-scratchpad-terminal@test.service`.
+Run this first:
+
+```sh
+./doctor.sh
+```
+
+It checks each step between the key press and the terminal: whether the script is installed, turned on and loaded, whether Meta+S really belongs to it (and if not, which other action has it), whether systemd can start a terminal that opens a window, and any errors the script logged. Then it presses Meta+S for you and shows what the script and the terminal did. Each failed check comes with a fix. `./install.sh` runs the same checks (without pressing Meta+S) when it finishes.
+
+Common causes:
+
+- **Meta+S does nothing.** Another action already has Meta+S, so KDE didn't give it to the scratchpad. `./doctor.sh` names that action.
+- **A terminal opens but doesn't act like a scratchpad.** Its window class didn't match. `./doctor.sh` shows the class it saw, so you can put that in "Terminal window class".
+- **No terminal opens.** `./doctor.sh` shows what systemd and the terminal logged.
 
 ## Uninstall
 

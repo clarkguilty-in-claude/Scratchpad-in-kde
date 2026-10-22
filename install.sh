@@ -41,16 +41,30 @@ kpackagetool6 --type KWin/Script --install "$repo_dir/kwin-script"
 kwriteconfig6 --file kwinrc --group Plugins --key "${script_id}Enabled" true
 kwin_scripting start
 
-# KWin loads scripts in the background, so give it a moment.
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if kwin_scripting isScriptLoaded s "$script_id" 2>/dev/null | grep -q true; then
-        echo "Done. Press Meta+S to open your scratchpad terminal."
-        exit 0
-    fi
+is_script_loaded() {
+    kwin_scripting isScriptLoaded s "$script_id" 2>/dev/null | grep -q true
+}
+
+# KWin loads scripts in the background, and drops a script again if it fails
+# while starting, so wait for it and then check that it's still there.
+for _ in $(seq 1 10); do
+    is_script_loaded && break
     sleep 0.5
 done
+sleep 1
 
-cat >&2 <<'EOF'
-Installed, but KWin hasn't loaded the script yet. Turn on "Scratchpad" in
-System Settings > Window Management > KWin Scripts, or log out and back in.
+echo
+echo "Checking the install..."
+"$repo_dir/doctor.sh" --no-press || true
+echo
+if is_script_loaded; then
+    echo "Press Meta+S to open your scratchpad terminal."
+    echo "If it doesn't work, run ./doctor.sh: it also presses Meta+S for you and shows what happened."
+else
+    cat >&2 <<'EOF'
+KWin didn't keep the script loaded. The checks above should say why. If not,
+turn on "Scratchpad" in System Settings > Window Management > KWin Scripts,
+or log out and back in, then run ./doctor.sh.
 EOF
+    exit 1
+fi

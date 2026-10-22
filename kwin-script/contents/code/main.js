@@ -1,22 +1,25 @@
 /*
  * Scratchpad for KDE Plasma 6.
  *
- * Keeps one window in a "scratchpad". Meta+S pulls it up on the current desktop,
- * above everything that's open (fullscreen windows included), and focuses it.
- * It isn't pinned there: whatever you open or click afterwards goes on top of
- * it. The next Meta+S hides it, whether or not it's covered or focused. It
- * always comes back with the same position and size. If the scratchpad is
- * empty, Meta+S opens a terminal and that terminal becomes the scratchpad.
+ * Keeps one window in a "scratchpad": a floating window that stays on top of
+ * everything. Meta+S shows it on the current desktop and focuses it. If you can
+ * see it, Meta+S hides it, whether it has focus or not. It always comes back
+ * with the same position and size. If the scratchpad is empty, Meta+S opens a
+ * terminal and that terminal becomes the scratchpad.
  *
  * KWin scripts can't start programs, so the terminal is started by asking
  * systemd to run kde-scratchpad-terminal@<n>.service (installed by install.sh).
  * The first matching window that opens after that becomes the scratchpad.
+ *
+ * Every step is logged with a "kde-scratchpad:" prefix:
+ *   journalctl --user -b | grep kde-scratchpad
  */
 
 const TERMINAL_UNIT_PREFIX = "kde-scratchpad-terminal@";
 const TERMINAL_STARTUP_TIMEOUT_MS = 15000;
 const DEFAULT_TERMINAL_COMMAND = "konsole";
 const DEFAULT_SIZE_PERCENT = 60;
+const LOG_PREFIX = "kde-scratchpad: ";
 
 let settings = readSettings();
 let scratchpadWindow = null;
@@ -28,6 +31,36 @@ let flagsBeforeScratchpad = null;
 let lastVisibleGeometry = null;
 // When we last asked systemd for a terminal, or null if we aren't waiting for one.
 let terminalRequestedAt = null;
+
+
+// ---- Logging ----------------------------------------------------------------
+
+function log(message) {
+    console.info(LOG_PREFIX + message);
+}
+
+function warn(message) {
+    console.warn(LOG_PREFIX + message);
+}
+
+// KWin throws away errors from shortcut handlers without a trace, so catch
+// them here and log them with the line they came from.
+function logErrors(actionName, handler) {
+    return function () {
+        try {
+            handler.apply(null, arguments);
+        } catch (error) {
+            warn(actionName + " failed: " + error
+                + (error && error.lineNumber ? " (main.js line " + error.lineNumber + ")" : ""));
+        }
+    };
+}
+
+// Only the app's class, never the window title: titles can hold paths or commands.
+function describeWindow(window) {
+    return String(window.resourceClass || window.desktopFileName || "unknown app")
+        + " (" + String(window.resourceName || "?") + ")";
+}
 
 
 // ---- Settings (System Settings > Window Management > KWin Scripts) ----------
@@ -61,14 +94,17 @@ function toPercent(value) {
 
 // ---- Shortcut actions -------------------------------------------------------
 
-// Meta+S. On screen (even covered or unfocused): hide it. Otherwise: show and
-// focus it. Empty: open a terminal, which then shows up focused.
+// Meta+S. Empty: open a terminal. Visible (focused or not): hide it.
+// Hidden, or completely covered: show it on top and focus it.
 function toggleScratchpad() {
     if (!scratchpadWindow) {
+        log("Meta+S: the scratchpad is empty, opening a terminal");
         startTerminal();
-    } else if (isScratchpadOnScreen()) {
+    } else if (isScratchpadVisible()) {
+        log("Meta+S: hiding the scratchpad");
         hideScratchpad();
     } else {
+        log("Meta+S: showing the scratchpad");
         showScratchpad();
     }
 }
@@ -80,11 +116,13 @@ function toggleFocusedWindowInScratchpad() {
         return;
     }
     if (focusedWindow === scratchpadWindow) {
+        log("Meta+Shift+S: taking " + describeWindow(focusedWindow) + " out of the scratchpad");
         releaseScratchpad();
         showOsd("Taken out of the scratchpad");
         return;
     }
     if (canBeScratchpad(focusedWindow)) {
+        log("Meta+Shift+S: moving " + describeWindow(focusedWindow) + " into the scratchpad");
         moveIntoScratchpad(focusedWindow);
     }
 }
@@ -95,6 +133,7 @@ function releaseAndShowScratchpad() {
     if (!window) {
         return;
     }
+    log("giving " + describeWindow(window) + " back as a normal window");
     releaseScratchpad();
     window.minimized = false;
     workspace.activeWindow = window;
@@ -111,6 +150,7 @@ function adopt(window) {
     scratchpadWindow = window;
     terminalRequestedAt = null;
     flagsBeforeScratchpad = {
+        keepAbove: window.keepAbove,
         skipTaskbar: window.skipTaskbar,
         skipPager: window.skipPager,
         skipSwitcher: window.skipSwitcher,
@@ -118,8 +158,9 @@ function adopt(window) {
     lastVisibleGeometry = copyRect(window.frameGeometry);
     window.frameGeometryChanged.connect(rememberGeometry);
 
-    // Kept out of the taskbar, pager and Alt+Tab: Meta+S is the way to reach it.
-    // Not pinned on top, so windows you open later can cover it.
+    // On top of other windows, and out of the taskbar, pager and Alt+Tab:
+    // Meta+S is the way to reach it.
+    window.keepAbove = true;
     window.skipTaskbar = true;
     window.skipPager = true;
     window.skipSwitcher = true;
@@ -145,9 +186,11 @@ function releaseScratchpad() {
     const window = scratchpadWindow;
     // Unknown when we picked the window up after a script reload; assume plain defaults.
     const originalFlags = flagsBeforeScratchpad
-        || { skipTaskbar: false, skipPager: false, skipSwitcher: false };
+        || { keepAbove: false, skipTaskbar: false, skipPager: false, skipSwitcher: false };
     forgetScratchpad();
+    unpinFromOtherWindows(window);
 
+    window.keepAbove = originalFlags.keepAbove;
     window.skipTaskbar = originalFlags.skipTaskbar;
     window.skipPager = originalFlags.skipPager;
     window.skipSwitcher = originalFlags.skipSwitcher;
@@ -171,14 +214,12 @@ function findLeftoverScratchpad() {
 
 // ---- Showing and hiding -----------------------------------------------------
 
-// On screen = not minimized, and on the desktop and activity you're looking at.
-// Other windows covering it or having focus doesn't matter.
-function isScratchpadOnScreen() {
+// Visible = not minimized, on the desktop and activity you're looking at, and
+// not completely covered by a fullscreen window. Focus doesn't matter.
+function isScratchpadVisible() {
     const window = scratchpadWindow;
-    if (window.minimized) {
-        return false;
-    }
-    return isOnCurrentDesktop(window) && isOnCurrentActivity(window);
+    return !window.minimized && isOnCurrentDesktop(window) && isOnCurrentActivity(window)
+        && !isCoveredByFullscreenWindow(window);
 }
 
 function isOnCurrentDesktop(window) {
@@ -203,6 +244,25 @@ function isOnCurrentActivity(window) {
         || windowActivities.indexOf(currentActivity) !== -1;
 }
 
+// Looks at KWin's real stacking order (bottom to top): is a fullscreen window on
+// the same screen stacked above the scratchpad?
+function isCoveredByFullscreenWindow(window) {
+    const stackingOrder = workspace.stackingOrder;
+    const windowScreen = screenName(window);
+    for (let index = stackingOrder.indexOf(window) + 1; index < stackingOrder.length; index++) {
+        const other = stackingOrder[index];
+        if (other !== window && other.fullScreen && !other.minimized && !other.deleted
+            && isOnCurrentDesktop(other) && screenName(other) === windowScreen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function screenName(window) {
+    return window.output ? window.output.name : "";
+}
+
 function showScratchpad() {
     const window = scratchpadWindow;
     // Read it before un-minimizing: if KWin moved the window while it was
@@ -210,15 +270,12 @@ function showScratchpad() {
     const geometryToRestore = lastVisibleGeometry;
 
     bringToCurrentDesktopAndActivity(window);
+    window.keepAbove = true;
+    pinAboveFullscreenAndPinnedWindows(window);
     window.minimized = false;
     restoreGeometry(window, geometryToRestore);
-    // Focusing and raising it puts it above everything that's open, fullscreen
-    // windows included: KWin only keeps a fullscreen window in its top layer
-    // while that window has focus.
     workspace.activeWindow = window;
-    if (typeof workspace.raiseWindow === "function") {
-        workspace.raiseWindow(window);
-    }
+    workspace.raiseWindow(window);
 }
 
 function hideScratchpad() {
@@ -231,6 +288,35 @@ function bringToCurrentDesktopAndActivity(window) {
     }
     if (!isOnCurrentActivity(window)) {
         window.activities = [workspace.currentActivity];
+    }
+}
+
+// Keep-above puts the scratchpad over normal windows. Fullscreen windows (while
+// they have focus) and other keep-above windows can still end up over it, so
+// tell KWin to keep the scratchpad above each of those that's open right now.
+// Windows that go fullscreen later can still cover it, the way a screenshot
+// tool's overlay should. KWin drops these rules itself when a window closes.
+function pinAboveFullscreenAndPinnedWindows(window) {
+    if (typeof workspace.constrain !== "function") {
+        return; // KWin older than 6.5
+    }
+    const windows = workspace.windowList();
+    for (let index = 0; index < windows.length; index++) {
+        const other = windows[index];
+        if (other !== window && other.normalWindow && !other.transient
+            && (other.fullScreen || other.keepAbove)) {
+            workspace.constrain(other, window);
+        }
+    }
+}
+
+function unpinFromOtherWindows(window) {
+    if (typeof workspace.unconstrain !== "function") {
+        return;
+    }
+    const windows = workspace.windowList();
+    for (let index = 0; index < windows.length; index++) {
+        workspace.unconstrain(windows[index], window);
     }
 }
 
@@ -257,9 +343,6 @@ function restoreGeometry(window, geometry) {
 
 function isOnAnyScreen(rect) {
     const screens = workspace.screens;
-    if (!screens) {
-        return true; // can't tell on this KWin version, so trust the saved spot
-    }
     const centerX = rect.x + rect.width / 2;
     const centerY = rect.y + rect.height / 2;
     for (let index = 0; index < screens.length; index++) {
@@ -307,16 +390,32 @@ function isWaitingForTerminal() {
         && Date.now() - terminalRequestedAt < TERMINAL_STARTUP_TIMEOUT_MS;
 }
 
+// Clears a terminal request that never turned into a window, and says so.
+function forgetExpiredTerminalRequest() {
+    if (terminalRequestedAt === null || isWaitingForTerminal()) {
+        return;
+    }
+    warn("no window with class \"" + settings.terminalWindowClass + "\" opened within "
+        + TERMINAL_STARTUP_TIMEOUT_MS / 1000 + " s of asking for a terminal. "
+        + "Run ./doctor.sh from the Scratchpad-in-kde folder to find out why.");
+    terminalRequestedAt = null;
+}
+
 function startTerminal() {
+    forgetExpiredTerminalRequest();
     if (isWaitingForTerminal()) {
-        return; // the one we asked for is still starting up
+        log("still waiting for the terminal from the last Meta+S");
+        return;
     }
     terminalRequestedAt = Date.now();
     // A new instance name every time, so systemd starts a fresh terminal even if
     // an earlier one (say, a window taken out of the scratchpad) is still running.
     const unitName = TERMINAL_UNIT_PREFIX + terminalRequestedAt + ".service";
+    log("asking systemd to start " + unitName);
+    // With a reply callback, KWin also logs systemd's error if the start fails.
     callDBus("org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-        "org.freedesktop.systemd1.Manager", "StartUnit", unitName, "replace");
+        "org.freedesktop.systemd1.Manager", "StartUnit", unitName, "replace",
+        () => log("systemd accepted " + unitName + ", waiting for its window"));
 }
 
 // Matches the whole class or one dot-separated part of it: "konsole" matches
@@ -331,13 +430,16 @@ function looksLikeTheTerminal(window) {
 }
 
 function onWindowAdded(window) {
-    if (!isWaitingForTerminal()) {
-        terminalRequestedAt = null;
+    forgetExpiredTerminalRequest();
+    if (terminalRequestedAt === null || scratchpadWindow || !canBeScratchpad(window)) {
         return;
     }
-    if (scratchpadWindow || !canBeScratchpad(window) || !looksLikeTheTerminal(window)) {
+    if (!looksLikeTheTerminal(window)) {
+        log("waiting for a \"" + settings.terminalWindowClass + "\" window, ignoring a new "
+            + describeWindow(window) + " window");
         return;
     }
+    log("the new " + describeWindow(window) + " window is now the scratchpad");
     adopt(window);
     centerNewTerminal(window);
     showScratchpad();
@@ -345,6 +447,7 @@ function onWindowAdded(window) {
 
 function onWindowRemoved(window) {
     if (window === scratchpadWindow) {
+        log("the scratchpad window closed, the next Meta+S opens a new terminal");
         forgetScratchpad();
     }
 }
@@ -353,14 +456,14 @@ function onWindowRemoved(window) {
 // ---- Wiring -----------------------------------------------------------------
 
 registerShortcut("Scratchpad: Toggle", "Scratchpad: Show or hide",
-    "Meta+S", toggleScratchpad);
+    "Meta+S", logErrors("Meta+S", toggleScratchpad));
 registerShortcut("Scratchpad: Move Focused Window", "Scratchpad: Move focused window in or out",
-    "Meta+Shift+S", toggleFocusedWindowInScratchpad);
+    "Meta+Shift+S", logErrors("Meta+Shift+S", toggleFocusedWindowInScratchpad));
 registerShortcut("Scratchpad: Release Window", "Scratchpad: Take the window out and show it",
-    "", releaseAndShowScratchpad);
+    "", logErrors("releasing the scratchpad", releaseAndShowScratchpad));
 
-workspace.windowAdded.connect(onWindowAdded);
-workspace.windowRemoved.connect(onWindowRemoved);
+workspace.windowAdded.connect(logErrors("handling a new window", onWindowAdded));
+workspace.windowRemoved.connect(logErrors("handling a closed window", onWindowRemoved));
 options.configChanged.connect(() => {
     settings = readSettings();
 });
@@ -369,5 +472,6 @@ const leftoverScratchpad = findLeftoverScratchpad();
 if (leftoverScratchpad) {
     adopt(leftoverScratchpad);
     flagsBeforeScratchpad = null; // what we'd record now are our own flags
-    leftoverScratchpad.keepAbove = false; // version 1.0 pinned it on top
+    log("picked up " + describeWindow(leftoverScratchpad) + " again as the scratchpad");
 }
+log("loaded (terminal window class: \"" + settings.terminalWindowClass + "\")");
